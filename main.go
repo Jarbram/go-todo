@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/go-chi/chi"
@@ -32,7 +35,7 @@ type (
 	todo struct {
 		ID        string    `json:"id"`
 		Title     string    `json:"title"`
-		Completed string    `json:"completed"`
+		Completed bool      `json:"completed"`
 		CreateAt  time.Time `json:"createAt"`
 	}
 )
@@ -44,13 +47,45 @@ func init() {
 	db = session.DB(dbName)
 }
 
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	err := rnd.Template(w, http.StatusOK, []string{"static/home.tpl"}, nil)
+	CheckErr(err)
+}
+
+func fetchTodos(w http.ResponseWriter, r *http.Request) {
+	todos := []todoModel{}
+
+	if err := db.C(collectionName).Find(bson.M{}).All(&todos); err != nil {
+		rnd.JSON(w, http.StatusProcessing, renderer.M{
+			"message": "Failed to fetch todos",
+			"error":   err,
+		})
+		return
+	}
+	todoList := []todo{}
+
+	for _, t := range todos {
+		todoList = append(todoList, todo{
+			ID:        t.ID.Hex(),
+			Title:     t.Title,
+			Completed: t.Completed,
+			CreateAt:  t.CreateAt,
+		})
+	}
+	rnd.JSON(w, http.StatusOK, renderer.M{
+		"data": todoList,
+	})
+}
+
 func main() {
+	stopChan := make(chan os.Signal)
+	signal.Notify(stopChan, os.Interrupt)
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Get("/", homeHandler)
 	r.Mount("/todo", todoHandler())
 
-	svr := &http.Server{
+	srv := &http.Server{
 		Addr:         port,
 		Handler:      r,
 		ReadTimeout:  60 * time.Second,
@@ -60,16 +95,23 @@ func main() {
 
 	go func() {
 		log.Println("listening on port", port)
-		if err := svr.ListenAndServe(); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			log.Printf("listen:%s\n", err)
 		}
 	}()
+
+	<-stopChan
+	log.Println("shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	srv.Shutdown(ctx)
+	defer cancel()
+	log.Println("server gracefully stopped")
 }
 
 func todoHandler() http.Handler {
 	rg := chi.NewRouter()
 	rg.Group(func(r chi.Router) {
-		r.Get("/", getTodos)
+		r.Get("/", fetchTodos)
 		r.Post("/", createTodoHandler)
 		r.Put("/{id}", updateTodoHandler)
 		r.Delete("/{id}", deleteTodoHandler)
